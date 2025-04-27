@@ -1,0 +1,247 @@
+From a65d1dd597094a79c0cfac26ee3884710c838d59 Mon Sep 17 00:00:00 2001
+From: Franco Pieri <franco-pieri@chromium.org>
+Date: Sun, 27 Apr 2025 13:27:42 -0400
+Subject: [PATCH] Added Restore functionality to histore toolbar.
+
+---
+ chrome/browser/resources/history/app.ts       | 12 ++++
+ .../browser/resources/history/history_list.ts | 68 +++++++++++++++++++
+ .../resources/history/history_toolbar.html    | 58 +++++++++-------
+ .../resources/history/history_toolbar.ts      |  4 ++
+ 4 files changed, 117 insertions(+), 25 deletions(-)
+
+diff --git a/chrome/browser/resources/history/app.ts b/chrome/browser/resources/history/app.ts
+index d689386b7b586..5b82adceff37d 100644
+--- a/chrome/browser/resources/history/app.ts
++++ b/chrome/browser/resources/history/app.ts
+@@ -408,6 +408,7 @@ export class HistoryAppElement extends HistoryAppElementBase {
+ 
+     this.addEventListener('cr-toolbar-menu-click', this.onCrToolbarMenuClick_);
+     this.addEventListener('delete-selected', this.deleteSelected);
++    this.addEventListener('restore-selected', this.restoreSelected);
+     this.addEventListener('history-checkbox-select', this.checkboxSelected);
+     this.addEventListener(
+         'product-spec-item-select',
+@@ -586,6 +587,17 @@ export class HistoryAppElement extends HistoryAppElementBase {
+     }
+   }
+ 
++  restoreSelected() {
++    if (this.selectedPage_ === Page.PRODUCT_SPECIFICATIONS_LISTS) {
++      const productSpecsListElement =
++          this.shadowRoot!.querySelector('product-specifications-lists');
++      assert(productSpecsListElement);
++      productSpecsListElement.restoreSelected();
++    } else {
++      this.$.history.restoreSelectedWithPrompt();
++    }
++  }
++  
+   private onQueryFinished_() {
+     this.$.history.historyResult(
+         this.queryResult_.info!, this.queryResult_.value!);
+diff --git a/chrome/browser/resources/history/history_list.ts b/chrome/browser/resources/history/history_list.ts
+index 3f73f6cf6de06..3cb6476d17e8c 100644
+--- a/chrome/browser/resources/history/history_list.ts
++++ b/chrome/browser/resources/history/history_list.ts
+@@ -59,6 +59,8 @@ declare global {
+ const HistoryListElementBase = I18nMixin(PolymerElement);
+ 
+ export class HistoryListElement extends HistoryListElementBase {
++  
++  
+   static get is() {
+     return 'history-list';
+   }
+@@ -148,6 +150,7 @@ export class HistoryListElement extends HistoryListElementBase {
+   private callbackRouter_: PageCallbackRouter =
+       BrowserServiceImpl.getInstance().callbackRouter;
+   declare private canDeleteHistory_: boolean;
++  declare private canRestoreHistory_: boolean;
+   declare private actionMenuModel_: ActionMenuModel|null;
+   private lastOffsetHeight_: number = 0;
+   private pageHandler_: PageHandlerRemote =
+@@ -171,6 +174,7 @@ export class HistoryListElement extends HistoryListElementBase {
+   declare searchedTerm: string;
+   declare selectedItems: Set<number>;
+   declare pendingDelete: boolean;
++  declare pendingRestore: boolean;
+   declare private lastFocused_: HTMLElement|null;
+   declare private listBlurred_: boolean;
+   declare lastSelectedIndex: number;
+@@ -354,6 +358,23 @@ export class HistoryListElement extends HistoryListElementBase {
+     button.focus();
+   }
+ 
++  restoreSelectedWithPrompt() {
++    if (!this.canRestoreHistory_) {
++      return;
++    }
++  
++    // Optionally record this action for analytics or logging purposes
++    this.browserService_.recordAction('RestoreSelected');
++    
++    // Show the confirmation dialog before restoring
++    this.$.dialog.get().showModal();
++    
++    // Focus on the confirm button in the dialog
++    const button = this.shadowRoot!.querySelector<HTMLElement>('.action-button');
++    assert(button);
++    button.focus();
++  }  
++
+   // Notifies the iron-list of this element being potentially resized.
+   notifyResize() {
+     this.$['infinite-list'].notifyResize();
+@@ -397,6 +418,32 @@ export class HistoryListElement extends HistoryListElementBase {
+     });
+   }
+ 
++  private restoreSelected_() {
++    // Ensure no pending restore actions are taking place
++    assert(!this.pendingRestore);
++  
++    // Gather the selected items
++    const toBeRestored = Array.from(this.selectedItems.values())
++      .map((index) => this.get(`historyData_.${index}`));
++  
++    // Open each selected history item in a new tab (or perform other restoration logic)
++    toBeRestored.forEach(item => {
++      if (item.url) {
++        window.open(item.url, '_blank'); // Opens each selected item in a new tab
++      }
++    });
++  
++    // Clear selection after restoring
++    this.pendingRestore = false;
++    this.removeItemsByIndex_(Array.from(this.selectedItems));
++    this.fire_('unselect-all');
++    
++    // Optionally reload the history data if nothing is left to display
++    if (this.historyData_.length === 0) {
++      this.fire_('query-history', false);
++    }
++  }
++  
+   removeItemsForTest(indices: number[]) {
+     this.removeItemsByIndex_(indices);
+   }
+@@ -452,6 +499,19 @@ export class HistoryListElement extends HistoryListElementBase {
+     dialog.close();
+   }
+ 
++  private onDialogConfirmClick_() {
++    // Record action for analytics or logging
++    this.browserService_.recordAction('ConfirmRestoreSelected');
++    
++    // Perform the restore action
++    this.restoreSelected_();
++  
++    // Close the dialog once done
++    const dialog = this.$.dialog.getIfExists();
++    assert(dialog);
++    dialog.close();
++  }  
++
+   private onDialogCancelClick_() {
+     this.browserService_.recordAction('CancelRemoveSelected');
+ 
+@@ -460,6 +520,14 @@ export class HistoryListElement extends HistoryListElementBase {
+     dialog.close();
+   }
+ 
++  private onDialogCancelClick_() {
++    this.browserService_.recordAction('CancelRestoreSelected');
++  
++    const dialog = this.$.dialog.getIfExists();
++    assert(dialog);
++    dialog.close();
++  }  
++
+   /**
+    * Remove bookmark star for history items with matching URLs.
+    */
+diff --git a/chrome/browser/resources/history/history_toolbar.html b/chrome/browser/resources/history/history_toolbar.html
+index 97de923939fa9..554e794d17a36 100644
+--- a/chrome/browser/resources/history/history_toolbar.html
++++ b/chrome/browser/resources/history/history_toolbar.html
+@@ -27,28 +27,36 @@
+       cr-toolbar-selection-overlay[show] {
+         opacity: 1;
+       }
+-    </style>
+-    <cr-toolbar id="mainToolbar"
+-        disable-right-content-grow
+-        has-overlay$="[[itemsSelected_]]"
+-        page-name="$i18n{title}"
+-        clear-label="$i18n{clearSearch}"
+-        search-icon-override="[[searchIconOverride_]]"
+-        search-input-aria-description="[[searchInputAriaDescription_]]"
+-        search-prompt="[[searchPrompt_]]"
+-        spinner-active="[[spinnerActive]]"
+-        autofocus
+-        show-menu="[[hasDrawer]]"
+-        menu-label="$i18n{historyMenuButton}"
+-        narrow-threshold="1023"
+-        on-search-changed="onSearchChanged_">
+-    </cr-toolbar>
+-    <cr-toolbar-selection-overlay show="[[itemsSelected_]]"
+-        cancel-label="$i18n{cancel}"
+-        selection-label="[[numberOfItemsSelected_(count)]]"
+-        on-clear-selected-items="clearSelectedItems">
+-      <cr-button
+-          on-click="deleteSelectedItems" disabled$="[[pendingDelete]]">
+-        $i18n{delete}
+-      </cr-button>
+-    </cr-toolbar-selection-overlay>
++</style>
++<cr-toolbar id="mainToolbar"
++    disable-right-content-grow
++    has-overlay$="[[itemsSelected_]]"
++    page-name="$i18n{title}"
++    clear-label="$i18n{clearSearch}"
++    search-icon-override="[[searchIconOverride_]]"
++    search-input-aria-description="[[searchInputAriaDescription_]]"
++    search-prompt="[[searchPrompt_]]"
++    spinner-active="[[spinnerActive]]"
++    autofocus
++    show-menu="[[hasDrawer]]"
++    menu-label="$i18n{historyMenuButton}"
++    narrow-threshold="1023"
++    on-search-changed="onSearchChanged_">
++</cr-toolbar>
++
++<cr-toolbar-selection-overlay show="[[itemsSelected_]]"
++    cancel-label="$i18n{cancel}"
++    selection-label="[[numberOfItemsSelected_(count)]]"
++    on-clear-selected-items="clearSelectedItems">
++
++  <cr-button
++      on-click="deleteSelectedItems" disabled$="[[pendingDelete]]">
++    $i18n{delete}
++  </cr-button>
++
++  <cr-button
++      on-click="restoreSelectedItems" disabled$="[[pendingDelete]]">
++    Restore
++  </cr-button>
++
++</cr-toolbar-selection-overlay>
+diff --git a/chrome/browser/resources/history/history_toolbar.ts b/chrome/browser/resources/history/history_toolbar.ts
+index b9f11be513047..c9946b961781d 100644
+--- a/chrome/browser/resources/history/history_toolbar.ts
++++ b/chrome/browser/resources/history/history_toolbar.ts
+@@ -130,6 +130,10 @@ export class HistoryToolbarElement extends PolymerElement {
+     this.fire_('delete-selected');
+   }
+ 
++  restoreSelectedItems() {
++    this.fire_('restore-selected');
++  }  
++
+   clearSelectedItems() {
+     this.fire_('unselect-all');
+     getAnnouncerInstance().announce(loadTimeData.getString('itemsUnselected'));
+-- 
+2.49.0.windows.1
+
